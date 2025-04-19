@@ -26,5 +26,5 @@ A React application for viewing and extracting metadata from images, including E
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/your-username/image-metadata-viewer.git
+git clone https://github.com/your-username/Image-Metadata-Viewer.git
 cd image-metadata-viewer
