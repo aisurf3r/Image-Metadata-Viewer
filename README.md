@@ -20,7 +20,7 @@ A React application for viewing and extracting metadata from images, including E
 
 ## Live Demo
 
-image-metadata-viewer.vercel.app
+https://image-metadata-viewer.vercel.app
 
 ## Installation 
 
