@@ -20,7 +20,7 @@ A React application for viewing and extracting metadata from images, including E
 
 ## Live Demo
 
-(coming)
+image-metadata-viewer.vercel.app
 
 ## Installation
 
@@ -28,3 +28,4 @@ A React application for viewing and extracting metadata from images, including E
 ```bash
 git clone https://github.com/your-username/Image-Metadata-Viewer.git
 cd image-metadata-viewer
+Made with ❤️ by @aisurf3r 
