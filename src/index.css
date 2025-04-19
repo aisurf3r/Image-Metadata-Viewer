@@ -1,1 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
+.leaflet-container {
+  z-index: 0;
+}
+
+.leaflet-marker-icon {
+  filter: hue-rotate(200deg);
+}
