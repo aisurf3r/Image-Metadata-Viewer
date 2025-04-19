@@ -264,7 +264,7 @@ function App() {
                   >
                     <motion.button
                       whileHover={{ scale: 1.05 }}
-                      className="flex items-center px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors shadow-lg"
+                      className="flex items-center px-2 py-1 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors shadow-lg"
                       onClick={handleClear}
                       data-oid="kikc8nw"
                     >
