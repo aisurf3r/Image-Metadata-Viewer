@@ -1,6 +1,7 @@
 # Image Metadata Viewer & Extractor
 
-![{0A1DFB41-38CD-4927-8055-4E50114435AD}](https://github.com/user-attachments/assets/cba1c4b5-bb2a-4994-a7f8-b8af9e6b44d9)
+![{58590AC0-8C92-45A6-A354-4DE48FA456D6}](https://github.com/user-attachments/assets/f53f6687-af91-44c1-80a2-29af394a8f5c)
+
 
 
 
