@@ -259,7 +259,7 @@ function App() {
                   <motion.div
                     initial={{ scale: 0 }}
                     animate={{ scale: 1 }}
-                    className="absolute -bottom-12 right-0"
+                    className="absolute -bottom-5 right-0"
                     data-oid="kbb-y-u"
                   >
                     <motion.button
