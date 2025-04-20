@@ -101,28 +101,8 @@ export const extractImageMetadata = async (file: File): Promise<ImageMetadata> =
       });
     };
     
-    // Try to determine best reading method based on file type
-    const isHeic = file.name.toLowerCase().endsWith('.heic') || 
-                  file.type.toLowerCase().includes('heic');
-                  
-    // For HEIC files (common in iOS), we need special handling
-    if (isHeic) {
-      import('heic2any').then(heic2any => {
-        heic2any.default({ blob: file, toType: 'image/jpeg' })
-          .then((jpegBlob: Blob) => {
-            reader.readAsArrayBuffer(jpegBlob);
-          })
-          .catch(() => {
-            // Fall back to normal reading if conversion fails
-            reader.readAsArrayBuffer(file);
-          });
-      }).catch(() => {
-        // If the dynamic import fails, fall back to normal reading
-        reader.readAsArrayBuffer(file);
-      });
-    } else {
-      reader.readAsArrayBuffer(file);
-    }
+    // For all image types, use readAsArrayBuffer - it works best for EXIF extraction
+    reader.readAsArrayBuffer(file);
   });
 };
 
