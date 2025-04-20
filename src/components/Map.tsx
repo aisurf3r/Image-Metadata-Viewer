@@ -4,6 +4,17 @@ import { UploadedImage } from "../types";
 import "leaflet/dist/leaflet.css";
 import { Icon } from "leaflet";
 
+// Estilos adicionales inline para arreglos móviles
+const mapStyles = `
+  .leaflet-container {
+    touch-action: pan-x pan-y;
+  }
+  .leaflet-touch .leaflet-bar {
+    border: none;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.4);
+  }
+`;
+
 // Fix default marker icon issue
 const defaultIcon = new Icon({
   iconUrl: "https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon.png",
@@ -14,23 +25,59 @@ const defaultIcon = new Icon({
   shadowSize: [41, 41],
 });
 
-// Map resizer component mejorado
+// Componente para inyectar estilos CSS
+function MapStyles() {
+  useEffect(() => {
+    // Añadir estilos solo si no existen ya
+    if (!document.getElementById('leaflet-mobile-fixes')) {
+      const styleElement = document.createElement('style');
+      styleElement.id = 'leaflet-mobile-fixes';
+      styleElement.innerHTML = mapStyles;
+      document.head.appendChild(styleElement);
+      
+      return () => {
+        // Cleanup al desmontar
+        const styleEl = document.getElementById('leaflet-mobile-fixes');
+        if (styleEl) document.head.removeChild(styleEl);
+      };
+    }
+  }, []);
+  
+  return null;
+}
+
+// Map resizer component mejorado para móviles
 function MapResizer() {
   const map = useMap();
 
   useEffect(() => {
     const handleResize = () => {
+      // Aumenta el tiempo de espera para dispositivos móviles
       setTimeout(() => {
         map.invalidateSize({ animate: true });
-      }, 200);
+      }, 400); // Aumentado de 200 a 400ms
     };
 
     // Ejecutar inmediatamente al montar
     handleResize();
+    
+    // También refrescar el mapa cuando se completa la carga
+    window.addEventListener('load', handleResize);
     window.addEventListener("resize", handleResize);
+    
+    // Touch events específicos para móviles
+    window.addEventListener("orientationchange", handleResize);
+    
+    // Forzar refresco adicional para dispositivos móviles
+    const isMobile = /Mobi|Android/i.test(navigator.userAgent);
+    if (isMobile) {
+      setTimeout(handleResize, 1000); // Refresco adicional después de 1s para móviles
+    }
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      window.removeEventListener('load', handleResize);
+      window.removeEventListener("orientationchange", handleResize);
     };
   }, [map]);
 
@@ -47,6 +94,32 @@ function SetViewOnChange({ center }: { center: { latitude: number; longitude: nu
     }
   }, [center, map]);
 
+  return null;
+}
+
+// Componente para manejar eventos móviles específicos
+function MobileFixes() {
+  useEffect(() => {
+    // Detectar si es dispositivo móvil
+    const isMobile = /Mobi|Android/i.test(navigator.userAgent);
+    
+    if (isMobile) {
+      // Función para forzar un refresco del mapa
+      const forceRefresh = () => {
+        setTimeout(() => {
+          window.dispatchEvent(new Event('resize'));
+        }, 800);
+      };
+      
+      // Aplicar después de la carga completa de la página
+      window.addEventListener('load', forceRefresh);
+      
+      return () => {
+        window.removeEventListener('load', forceRefresh);
+      };
+    }
+  }, []);
+  
   return null;
 }
 
@@ -71,15 +144,22 @@ export const Map: React.FC<Props> = ({
   };
 
   return (
-    <div className="w-full h-[400px] rounded-lg overflow-hidden relative z-[400]">
+    <div className="w-full h-[400px] rounded-lg overflow-hidden relative z-[500]">
+      <MapStyles />
       <MapContainer
         center={[center.latitude, center.longitude]}
         zoom={13}
         style={{ width: "100%", height: "100%" }}
-        trackResize={true} // Nueva prop añadida
+        trackResize={true}
         zoomControl={false}
+        tap={true} // Habilita explícitamente los eventos táctiles
+        dragging={true} // Asegura que el arrastre está habilitado
+        doubleClickZoom={true} // Habilita el zoom con doble clic/toque
+        touchZoom={true} // Habilita zoom con gestos táctiles
+        scrollWheelZoom={true} // Habilita zoom con rueda de ratón/gestos
       >
         <MapResizer />
+        <MobileFixes />
         <SetViewOnChange center={center} />
         <TileLayer
           url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
