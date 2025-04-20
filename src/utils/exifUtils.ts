@@ -236,7 +236,7 @@ function findGpsData(tags: any): { latitude: number, longitude: number } | undef
   // 7. Check for array-style coordinates
   if (tags.location?.coordinates || tags.coordinates) {
     const coords = tags.location?.coordinates || tags.coordinates;
-    if (Array.isArray(coords) {
+    if (Array.isArray(coords)) {
       const lon = parseFloat(coords[0]);
       const lat = parseFloat(coords[1]);
       if (isValidCoordinate(lat, lon)) return { latitude: lat, longitude: lon };
@@ -360,7 +360,6 @@ function convertCoordinates(coordStr: string): number {
   return 0;
 }
 
-// Resto de funciones auxiliares (extractExposureTime, extractFNumber, etc.) permanecen iguales
 function extractExposureTime(tags: any): string | undefined {
   const exposureValue = findValue(tags, [
     'ExposureTime', 'ShutterSpeedValue', 'Exposure', 'ShutterSpeed',
