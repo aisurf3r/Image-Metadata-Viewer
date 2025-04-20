@@ -14,31 +14,37 @@ const defaultIcon = new Icon({
   shadowSize: [41, 41],
 });
 
-// Map resizer component mejorado
+// Map resizer component that handles invalidateSize
 function MapResizer() {
   const map = useMap();
 
   useEffect(() => {
+    // This ensures the map renders correctly after mounting
+    map.invalidateSize();
+
+    // Handle window resize events
     const handleResize = () => {
-      setTimeout(() => {
-        map.invalidateSize({ animate: true });
-      }, 200);
+      map.invalidateSize();
     };
 
-    // Ejecutar inmediatamente al montar
-    handleResize();
     window.addEventListener("resize", handleResize);
+
+    // Small delay to ensure container is fully rendered
+    const timeoutId = setTimeout(() => {
+      map.invalidateSize();
+    }, 100);
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      clearTimeout(timeoutId);
     };
   }, [map]);
 
   return null;
 }
 
-// Componente para actualizar el centro del mapa
-function SetViewOnChange({ center }: { center: { latitude: number; longitude: number } }) {
+// New component to update map center when selectedImage changes
+function SetViewOnChange({ center }) {
   const map = useMap();
 
   useEffect(() => {
@@ -71,13 +77,12 @@ export const Map: React.FC<Props> = ({
   };
 
   return (
-    <div className="w-full h-[400px] rounded-lg overflow-hidden relative z-[400]">
+    <div className="w-full h-[400px] rounded-lg overflow-hidden">
       <MapContainer
         center={[center.latitude, center.longitude]}
         zoom={13}
         style={{ width: "100%", height: "100%" }}
-        trackResize={true} // Nueva prop añadida
-        zoomControl={false}
+        crossOrigin="anonymous"
       >
         <MapResizer />
         <SetViewOnChange center={center} />
@@ -105,7 +110,6 @@ export const Map: React.FC<Props> = ({
                 alt={image.metadata.fileName}
                 className="w-32 h-32 object-cover"
                 crossOrigin="anonymous"
-                loading="lazy"
               />
             </Popup>
           </Marker>
