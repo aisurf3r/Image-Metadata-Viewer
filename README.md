@@ -29,4 +29,6 @@ https://metadataviewer.vercel.app
 git clone https://github.com/your-username/Image-Metadata-Viewer.git
 cd image-metadata-viewer   
 
+TODO: Map not loading in mobile devices, leaflet problem.
+
 Made with ❤️ by @aisurf3r 
