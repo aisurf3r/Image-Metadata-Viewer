@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 .leaflet-container {
-  z-index: 0;
+  z-index: 1;
 }
 
 .leaflet-marker-icon {
