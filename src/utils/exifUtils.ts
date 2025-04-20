@@ -8,36 +8,41 @@ export const extractImageMetadata = async (file: File): Promise<ImageMetadata> =
     reader.onload = async (e) => {
       try {
         if (!e.target?.result) {
-          throw new Error('No se pudo leer el archivo');
+          throw new Error('Failed to read file');
         }
         
-        // Opciones extendidas para ExifReader - crucial para cámaras modernas
         const options = {
           expanded: true,
           includeUnknown: true,
-          reviveValues: true, // Importante: intenta recuperar valores en formatos no estándar
-          translateKeys: true, // Traduce claves propietarias a estándar cuando sea posible
-          translateValues: true, // Intenta traducir valores a formatos estándar
+          reviveValues: true,
+          translateKeys: true,
+          translateValues: true,
         };
         
-        console.log("Procesando archivo:", file.name, "Tipo:", file.type, "Tamaño:", file.size);
+        // Add timeout for mobile devices that might need more processing time
+        const timeoutPromise = new Promise<any>((_, reject) => {
+          setTimeout(() => reject(new Error('EXIF extraction timeout')), 10000);
+        });
         
-        // Cargar metadatos con opciones extendidas
-        const tags = await ExifReader.load(e.target.result, options);
+        // Race between normal extraction and timeout
+        const tags = await Promise.race([
+          ExifReader.load(e.target.result, options),
+          timeoutPromise
+        ]).catch(err => {
+          console.warn('EXIF extraction issue:', err);
+          return {}; // Return empty object on error to avoid complete failure
+        });
         
-        // Depuración detallada - ayuda a identificar dónde están los datos
-        console.log("Tags encontrados:", Object.keys(tags));
-        
-        // Verificar si hay tags XMP, que a veces contienen información en cámaras modernas
-        if (tags.xmp) {
-          console.log("XMP tags encontrados:", Object.keys(tags.xmp));
+        // Handle case where extraction failed completely
+        if (!tags || Object.keys(tags).length === 0) {
+          console.warn('No EXIF data found or extraction failed');
+          return resolve({ fileName: file.name });
         }
         
-        // Buscar información GPS en múltiples ubicaciones posibles
+        // First try to extract GPS data - this is the focus of our improvement
         const gpsData = findGpsData(tags);
-        console.log("Datos GPS encontrados:", gpsData);
         
-        // Extraer make y model con un enfoque más amplio
+        // Extract make and model with broader approach
         const make = findValue(tags, [
           'Make', 'Manufacturer', 'CameraManufacturer', 'xmp:Make',
           'Software', 'DeviceManufacturer', 'MakerNote', 'Brand',
@@ -50,14 +55,14 @@ export const extractImageMetadata = async (file: File): Promise<ImageMetadata> =
           'DeviceName', 'PhoneModel'
         ])?.trim();
         
-        // Lógica para evitar la duplicación de marca en el modelo
+        // Avoid make duplication in model
         const cleanModel = model && make ? 
           (model.toLowerCase().includes(make.toLowerCase()) ? 
             model : 
             `${make} ${model}`) :
           model;
         
-        // Extraer metadatos con un enfoque más agresivo
+        // Extract all metadata
         const metadata: ImageMetadata = {
           fileName: file.name,
           dateTime: findValue(tags, [
@@ -70,7 +75,6 @@ export const extractImageMetadata = async (file: File): Promise<ImageMetadata> =
           fNumber: extractFNumber(tags),
           iso: extractISO(tags),
           focalLength: extractFocalLength(tags),
-          // Nuevos campos adicionales
           software: findValue(tags, ['Software', 'ProcessingSoftware', 'Creator']),
           orientation: extractOrientation(tags),
           resolution: extractResolution(tags),
@@ -80,11 +84,10 @@ export const extractImageMetadata = async (file: File): Promise<ImageMetadata> =
           gps: gpsData
         };
         
-        console.log("Metadatos extraídos:", metadata);
         resolve(metadata);
         
       } catch (error) {
-        console.error('Error al extraer metadatos EXIF:', error);
+        console.error('Error extracting EXIF metadata:', error);
         resolve({
           fileName: file.name
         });
@@ -92,33 +95,62 @@ export const extractImageMetadata = async (file: File): Promise<ImageMetadata> =
     };
     
     reader.onerror = () => {
-      console.error('Error al leer el archivo');
+      console.error('Error reading file');
       resolve({
         fileName: file.name
       });
     };
     
-    // Usar readAsArrayBuffer para mejor compatibilidad
-    reader.readAsArrayBuffer(file);
+    // Try to determine best reading method based on file type
+    const isHeic = file.name.toLowerCase().endsWith('.heic') || 
+                  file.type.toLowerCase().includes('heic');
+                  
+    // For HEIC files (common in iOS), we need special handling
+    if (isHeic) {
+      import('heic2any').then(heic2any => {
+        heic2any.default({ blob: file, toType: 'image/jpeg' })
+          .then((jpegBlob: Blob) => {
+            reader.readAsArrayBuffer(jpegBlob);
+          })
+          .catch(() => {
+            // Fall back to normal reading if conversion fails
+            reader.readAsArrayBuffer(file);
+          });
+      }).catch(() => {
+        // If the dynamic import fails, fall back to normal reading
+        reader.readAsArrayBuffer(file);
+      });
+    } else {
+      reader.readAsArrayBuffer(file);
+    }
   });
 };
 
-// Función que busca en profundidad un valor en el objeto de tags
+// Find value deeply in the tags object
 function findValue(tags: any, possibleKeys: string[]): string | undefined {
-  // Primero buscar en la raíz
+  if (!tags) return undefined;
+  
+  // First search at root level
   for (const key of possibleKeys) {
     if (tags[key] && tags[key].description) {
       return tags[key].description;
     }
     
-    // Buscar en formato de valor directo
     if (tags[key] && typeof tags[key].value !== 'undefined') {
       return String(tags[key].value);
     }
+    
+    // Direct value
+    if (tags[key] && (typeof tags[key] === 'string' || typeof tags[key] === 'number')) {
+      return String(tags[key]);
+    }
   }
   
-  // Buscar en subobjetos (como xmp, exif, etc.)
-  const subObjects = ['xmp', 'exif', 'gps', 'GPS', 'ifd0', 'ifd1', 'apple', 'samsung', 'canon', 'nikon', 'olympus', 'panasonic', 'sony', 'fujifilm'];
+  // Search in common subobjects
+  const subObjects = ['xmp', 'exif', 'gps', 'GPS', 'ifd0', 'ifd1', 'apple', 'samsung', 
+                      'canon', 'nikon', 'olympus', 'panasonic', 'sony', 'fujifilm',
+                      'google', 'huawei', 'xiaomi', 'oppo', 'vivo', 'oneplus', 'asus'];
+  
   for (const subObj of subObjects) {
     if (!tags[subObj]) continue;
     
@@ -127,27 +159,45 @@ function findValue(tags: any, possibleKeys: string[]): string | undefined {
         return tags[subObj][key].description;
       }
       
-      // Buscar en formato de valor directo
       if (tags[subObj][key] && typeof tags[subObj][key].value !== 'undefined') {
         return String(tags[subObj][key].value);
+      }
+      
+      // Direct value
+      if (tags[subObj][key] && (typeof tags[subObj][key] === 'string' || typeof tags[subObj][key] === 'number')) {
+        return String(tags[subObj][key]);
       }
     }
   }
   
-  // Buscar en tags específicos para dispositivos móviles (Android, iPhone, etc.)
-  const deviceSpecificPaths = [
-    'MakerNote.Apple', 'MakerNote.Samsung', 'MakerNote.Huawei', 'MakerNote.Sony',
-    'MakerNotes.Apple', 'MakerNotes.Samsung', 'MakerNotes.Huawei', 'MakerNotes.Sony',
-    'apple.tags', 'samsung.tags', 'huawei.tags', 'sony.tags',
-    'iphoneinfo', 'androidinfo', 'pixelinfo'
+  // Search in device-specific paths
+  searchInNestedPaths(tags, possibleKeys);
+  
+  return undefined;
+}
+
+// Search in deeply nested paths - especially for mobile devices
+function searchInNestedPaths(tags: any, possibleKeys: string[]): string | undefined {
+  // Handle more deeply nested paths common in mobile devices
+  const devicePaths = [
+    'MakerNote.Apple', 'MakerNotes.Apple', 'apple.tags', 'Apple',
+    'MakerNote.Samsung', 'MakerNotes.Samsung', 'samsung.tags', 'Samsung',
+    'MakerNote.Huawei', 'MakerNotes.Huawei', 'huawei.tags', 'Huawei',
+    'MakerNote.Sony', 'MakerNotes.Sony', 'sony.tags', 'Sony',
+    'MakerNote.Google', 'MakerNotes.Google', 'google.tags', 'Google',
+    'MakerNote.Xiaomi', 'MakerNotes.Xiaomi', 'xiaomi.tags', 'Xiaomi',
+    'MakerNote.Oppo', 'MakerNotes.Oppo', 'oppo.tags', 'Oppo',
+    'MakerNote.Vivo', 'MakerNotes.Vivo', 'vivo.tags', 'Vivo',
+    'MakerNote.OnePlus', 'MakerNotes.OnePlus', 'oneplus.tags', 'OnePlus',
+    'MakerNote.Asus', 'MakerNotes.Asus', 'asus.tags', 'Asus',
+    'iphoneinfo', 'androidinfo', 'pixelinfo', 'iOS', 'Android'
   ];
   
-  for (const path of deviceSpecificPaths) {
+  for (const path of devicePaths) {
     const parts = path.split('.');
     let current = tags;
     let valid = true;
     
-    // Recorrer la ruta
     for (const part of parts) {
       if (!current[part]) {
         valid = false;
@@ -156,32 +206,13 @@ function findValue(tags: any, possibleKeys: string[]): string | undefined {
       current = current[part];
     }
     
-    // Si la ruta es válida, buscar en este objeto
     if (valid) {
       for (const key of possibleKeys) {
         if (current[key]) {
           if (current[key].description) return current[key].description;
           if (typeof current[key].value !== 'undefined') return String(current[key].value);
-          if (typeof current[key] === 'string') return current[key];
+          if (typeof current[key] === 'string' || typeof current[key] === 'number') return String(current[key]);
         }
-      }
-    }
-  }
-  
-  // Buscar en Android/iPhone-specific tags
-  const deviceSpecificKeys = [
-    'SonyModelID', 'AndroidVersion', 'AndroidManufacturer',
-    'AppleModel', 'AppleMake', 'AppleDevice',
-    'SamsungModel', 'SamsungDevice',
-    'HuaweiModel', 'HuaweiDevice',
-    'GoogleModel', 'GoogleDevice',
-    'iPhone', 'iPad', 'iOS'
-  ];
-  
-  for (const key of deviceSpecificKeys) {
-    if (tags[key] && tags[key].description) {
-      if (possibleKeys.includes('Make') || possibleKeys.includes('Model')) {
-        return tags[key].description;
       }
     }
   }
@@ -189,64 +220,89 @@ function findValue(tags: any, possibleKeys: string[]): string | undefined {
   return undefined;
 }
 
-// Función específica para encontrar datos GPS en cámaras modernas
+// Function specific for finding GPS data in modern cameras/phones
 function findGpsData(tags: any): { latitude: number, longitude: number } | undefined {
-  // Lugares comunes donde podrían estar los datos GPS
+  // First check for common mobile device location metadata formats
+  
+  // 1. Check for iOS location format
+  if (tags.apple && tags.apple.Location) {
+    const latitude = parseFloat(tags.apple.Location.Latitude?.value || tags.apple.Location.Latitude);
+    const longitude = parseFloat(tags.apple.Location.Longitude?.value || tags.apple.Location.Longitude);
+    
+    if (!isNaN(latitude) && !isNaN(longitude)) {
+      return { latitude, longitude };
+    }
+  }
+  
+  // 2. Check for Android format (various manufacturers)
+  const androidManufacturers = ['samsung', 'google', 'huawei', 'xiaomi', 'oppo', 'vivo', 'oneplus', 'asus'];
+  for (const manufacturer of androidManufacturers) {
+    if (tags[manufacturer] && tags[manufacturer].Location) {
+      const latitude = parseFloat(tags[manufacturer].Location.Latitude?.value || tags[manufacturer].Location.Latitude);
+      const longitude = parseFloat(tags[manufacturer].Location.Longitude?.value || tags[manufacturer].Location.Longitude);
+      
+      if (!isNaN(latitude) && !isNaN(longitude)) {
+        return { latitude, longitude };
+      }
+    }
+  }
+  
+  // 3. Check for XMP Location format (used by some mobile apps)
+  if (tags.xmp && tags.xmp.Location) {
+    const latitude = parseFloat(tags.xmp.Location.Latitude?.value || tags.xmp.Location.Latitude);
+    const longitude = parseFloat(tags.xmp.Location.Longitude?.value || tags.xmp.Location.Longitude);
+    
+    if (!isNaN(latitude) && !isNaN(longitude)) {
+      return { latitude, longitude };
+    }
+  }
+  
+  // 4. Check for direct geo coordinates (some phones store them directly)
+  if (tags.GPSLatitude && tags.GPSLongitude) {
+    try {
+      let latitude = processGpsValue(tags.GPSLatitude);
+      let longitude = processGpsValue(tags.GPSLongitude);
+      
+      // Apply reference direction
+      if (tags.GPSLatitudeRef && tags.GPSLatitudeRef.value === 'S') latitude = -latitude;
+      if (tags.GPSLongitudeRef && tags.GPSLongitudeRef.value === 'W') longitude = -longitude;
+      
+      if (!isNaN(latitude) && !isNaN(longitude)) {
+        return { latitude, longitude };
+      }
+    } catch (e) {
+      console.warn("Error processing direct GPS coordinates:", e);
+    }
+  }
+  
+  // 5. Common GPS objects
   const possibleGpsObjects = [
     tags.GPS,
     tags.gps,
     tags.GPSInfo,
     tags['GPS Info'],
+    tags.exif?.GPS,
     tags.xmp?.GPS
   ].filter(Boolean);
   
-  // También buscar por pares de coordenadas directamente en la raíz
-  if (tags.GPSLatitude && tags.GPSLongitude) {
+  // Also check for coordinates directly in the root
+  if (tags.GPSLatitude || tags.GpsLatitude || tags.Latitude) {
     possibleGpsObjects.push(tags);
   }
   
-  // Android moderno a veces usa estos nombres
-  if (tags.GPSLatitudeRef || tags.GpsLatitudeRef) {
-    possibleGpsObjects.push(tags);
-  }
-  
-  // Para dispositivos móviles específicamente
-  const mobilePaths = [
-    'MakerNote.Apple.GPS', 'MakerNote.Samsung.GPS', 'MakerNote.Huawei.GPS', 
-    'MakerNote.Sony.GPS', 'MakerNote.Google.GPS', 'MakerNote.Xiaomi.GPS'
-  ];
-  
-  for (const path of mobilePaths) {
-    const parts = path.split('.');
-    let current = tags;
-    let valid = true;
-    
-    for (const part of parts) {
-      if (!current[part]) {
-        valid = false;
-        break;
-      }
-      current = current[part];
-    }
-    
-    if (valid) possibleGpsObjects.push(current);
-  }
-  
-  // Buscar en los posibles objetos
+  // Process each possible GPS object
   for (const gpsObj of possibleGpsObjects) {
-    console.log("Analizando objeto GPS:", gpsObj);
-    
-    // Extraer latitud
+    // Get latitude value
     const latValue = getGpsCoordinate(gpsObj, [
       'GPSLatitude', 'Latitude', 'GpsLatitude', 'Lat', 'LatitudeValue', 'lat'
     ]);
     
-    // Extraer longitud
+    // Get longitude value
     const lonValue = getGpsCoordinate(gpsObj, [
       'GPSLongitude', 'Longitude', 'GpsLongitude', 'Lon', 'LongitudeValue', 'lng', 'lon'
     ]);
     
-    // Extraer referencias (N/S/E/W)
+    // Get reference directions
     const latRef = getGpsRef(gpsObj, [
       'GPSLatitudeRef', 'LatitudeRef', 'GpsLatitudeRef', 'LatRef', 'latRef'
     ]) || 'N';
@@ -255,79 +311,124 @@ function findGpsData(tags: any): { latitude: number, longitude: number } | undef
       'GPSLongitudeRef', 'LongitudeRef', 'GpsLongitudeRef', 'LonRef', 'lngRef', 'lonRef'
     ]) || 'E';
     
-    console.log("Valores GPS brutos:", { latValue, lonValue, latRef, lonRef });
-    
-    // Si encontramos valores, convertirlos
+    // Process values based on their type
     if (latValue !== undefined && lonValue !== undefined) {
-      // Usar los valores crudos si ya son números
-      if (typeof latValue === 'number' && typeof lonValue === 'number') {
-        const lat = latRef === 'S' ? -latValue : latValue;
-        const lon = lonRef === 'W' ? -lonValue : lonValue;
-        return { latitude: lat, longitude: lon };
-      }
-      
-      // Si son strings, convertirlos
-      if (typeof latValue === 'string' && typeof lonValue === 'string') {
-        try {
-          let lat = convertCoordinates(latValue, latRef);
-          let lon = convertCoordinates(lonValue, lonRef);
-          
-          // Verificar si son valores válidos y no cero
-          if (lat !== 0 || lon !== 0) {
-            return { latitude: lat, longitude: lon };
-          }
-        } catch (e) {
-          console.warn("Error al convertir coordenadas:", e);
+      try {
+        let lat: number;
+        let lon: number;
+        
+        // Handle different data types
+        if (typeof latValue === 'number' && typeof lonValue === 'number') {
+          lat = latValue;
+          lon = lonValue;
+        } else if (typeof latValue === 'string' && typeof lonValue === 'string') {
+          lat = convertCoordinates(latValue);
+          lon = convertCoordinates(lonValue);
+        } else if (Array.isArray(latValue) && Array.isArray(lonValue)) {
+          lat = processCoordinateArray(latValue);
+          lon = processCoordinateArray(lonValue);
+        } else {
+          // Skip if incompatible types
+          continue;
         }
-      }
-      
-      // Si son arrays, procesarlos directamente
-      if (Array.isArray(latValue) && Array.isArray(lonValue)) {
-        try {
-          const lat = processCoordinateArray(latValue, latRef);
-          const lon = processCoordinateArray(lonValue, lonRef);
+        
+        // Apply reference direction
+        if (latRef === 'S') lat = -Math.abs(lat);
+        if (lonRef === 'W') lon = -Math.abs(lon);
+        
+        // Validate coordinates
+        if (isValidCoordinate(lat, lon)) {
           return { latitude: lat, longitude: lon };
-        } catch (e) {
-          console.warn("Error al procesar arrays de coordenadas:", e);
         }
+      } catch (e) {
+        console.warn("Error processing GPS coordinates:", e);
       }
     }
   }
   
-  // Buscar en formato LocationIQ (comúnmente usado en smartphones modernos)
+  // 6. Check for LocationIQ format
   if (tags.Location || tags.location || tags.LocationIQ) {
     const locationObj = tags.Location || tags.location || tags.LocationIQ;
     
     if (locationObj.coordinates) {
       const coords = locationObj.coordinates.value || locationObj.coordinates;
       if (Array.isArray(coords) && coords.length >= 2) {
-        // Formato común: [longitud, latitud]
-        return { latitude: coords[1], longitude: coords[0] };
+        const latitude = parseFloat(coords[1]);
+        const longitude = parseFloat(coords[0]);
+        
+        if (isValidCoordinate(latitude, longitude)) {
+          return { latitude, longitude };
+        }
       }
     }
   }
   
-  // Si llegamos aquí, no encontramos datos GPS válidos
-  console.warn("No se encontraron datos GPS válidos");
   return undefined;
 }
 
-// Obtener coordenada GPS de varias posibles fuentes
+// Check if coordinates are valid
+function isValidCoordinate(latitude: number, longitude: number): boolean {
+  // Check if coordinates are numbers
+  if (isNaN(latitude) || isNaN(longitude)) return false;
+  
+  // Check if coordinates are in valid range
+  if (latitude < -90 || latitude > 90) return false;
+  if (longitude < -180 || longitude > 180) return false;
+  
+  // Check if coordinates are not exactly 0,0 (often a default when no real data exists)
+  if (latitude === 0 && longitude === 0) return false;
+  
+  return true;
+}
+
+// Process GPS value (handle both objects and direct values)
+function processGpsValue(gpsData: any): number {
+  if (!gpsData) return 0;
+  
+  // Handle object with value property
+  if (gpsData.value !== undefined) {
+    if (Array.isArray(gpsData.value)) {
+      return processCoordinateArray(gpsData.value);
+    } else if (typeof gpsData.value === 'number') {
+      return gpsData.value;
+    } else if (typeof gpsData.value === 'string') {
+      return convertCoordinates(gpsData.value);
+    }
+  }
+  
+  // Handle direct array
+  if (Array.isArray(gpsData)) {
+    return processCoordinateArray(gpsData);
+  }
+  
+  // Handle direct number
+  if (typeof gpsData === 'number') {
+    return gpsData;
+  }
+  
+  // Handle direct string
+  if (typeof gpsData === 'string') {
+    return convertCoordinates(gpsData);
+  }
+  
+  return 0;
+}
+
+// Get GPS coordinate from various possible sources
 function getGpsCoordinate(obj: any, possibleKeys: string[]): string | number | any[] | undefined {
   if (!obj) return undefined;
   
   for (const key of possibleKeys) {
-    // Comprobar si existe la clave
     if (obj[key]) {
-      // Caso 1: Hay una descripción
+      // Case 1: Description property
       if (obj[key].description) {
         return obj[key].description;
       }
-      // Caso 2: Hay un valor directo
+      // Case 2: Direct value property
       if (obj[key].value !== undefined) {
         return obj[key].value;
       }
-      // Caso 3: Es un array o valor directo
+      // Case 3: Array or direct value
       if (Array.isArray(obj[key]) || typeof obj[key] === 'number' || typeof obj[key] === 'string') {
         return obj[key];
       }
@@ -337,21 +438,21 @@ function getGpsCoordinate(obj: any, possibleKeys: string[]): string | number | a
   return undefined;
 }
 
-// Obtener referencia GPS (N/S/E/W)
+// Get GPS reference (N/S/E/W)
 function getGpsRef(obj: any, possibleKeys: string[]): string | undefined {
   if (!obj) return undefined;
   
   for (const key of possibleKeys) {
     if (obj[key]) {
-      // Caso 1: Hay una descripción
+      // Case 1: Description property
       if (obj[key].description) {
         return obj[key].description;
       }
-      // Caso 2: Hay un valor directo
+      // Case 2: Direct string value
       if (typeof obj[key] === 'string') {
         return obj[key];
       }
-      // Caso 3: Es un valor dentro de un objeto
+      // Case 3: Value property
       if (obj[key].value !== undefined) {
         return obj[key].value;
       }
@@ -361,94 +462,78 @@ function getGpsRef(obj: any, possibleKeys: string[]): string | undefined {
   return undefined;
 }
 
-// Convertir array de coordenadas [grados, minutos, segundos] a decimal
-function processCoordinateArray(coordArray: any[], ref?: string): number {
+// Convert coordinate array [degrees, minutes, seconds] to decimal
+function processCoordinateArray(coordArray: any[]): number {
   if (!coordArray || coordArray.length < 1) return 0;
   
-  let decimal = 0;
+  // Convert all elements to numbers if they're not already
+  const numericArray = coordArray.map(item => {
+    if (typeof item === 'number') return item;
+    if (typeof item === 'string') return parseFloat(item);
+    if (item && typeof item.value === 'number') return item.value;
+    if (item && typeof item.value === 'string') return parseFloat(item.value);
+    return 0;
+  });
   
-  // Formato común: [grados, minutos, segundos]
-  if (coordArray.length >= 3) {
-    const degrees = Number(coordArray[0]);
-    const minutes = Number(coordArray[1]);
-    const seconds = Number(coordArray[2]);
-    
-    decimal = degrees + (minutes / 60) + (seconds / 3600);
+  // Process based on array length
+  if (numericArray.length >= 3) {
+    // Format: [degrees, minutes, seconds]
+    return numericArray[0] + (numericArray[1] / 60) + (numericArray[2] / 3600);
+  } else if (numericArray.length === 2) {
+    // Format: [degrees, minutes]
+    return numericArray[0] + (numericArray[1] / 60);
+  } else {
+    // Format: [degrees] or unknown
+    return numericArray[0];
   }
-  // Formato alternativo: solo grados
-  else if (coordArray.length === 1) {
-    decimal = Number(coordArray[0]);
-  }
-  // Formato alternativo: grados y minutos
-  else if (coordArray.length === 2) {
-    const degrees = Number(coordArray[0]);
-    const minutes = Number(coordArray[1]);
-    
-    decimal = degrees + (minutes / 60);
-  }
-  
-  // Ajustar según referencia
-  if (ref === 'S' || ref === 'W') {
-    decimal = -decimal;
-  }
-  
-  return decimal;
 }
 
-// Función mejorada para convertir coordenadas de string
-function convertCoordinates(coordStr: string, ref?: string): number {
+// Convert coordinate string to decimal
+function convertCoordinates(coordStr: string): number {
   if (!coordStr) return 0;
   
-  // Si ya es un número, simplemente ajustar por referencia
+  // If already a number string, parse it
   if (!isNaN(parseFloat(coordStr))) {
-    let decimal = parseFloat(coordStr);
-    if (ref === 'S' || ref === 'W') decimal = -decimal;
-    return decimal;
+    return parseFloat(coordStr);
   }
   
-  // Formato específico para Android/Sony "XX° XX' XX.XX""
-  const degMinSecRegex1 = /(\d+)°\s*(\d+)'\s*(\d+\.?\d*)"/;
+  // Pattern 1: "XX° XX' XX.XX""
+  const degMinSecRegex1 = /(\d+(?:\.\d+)?)°\s*(\d+(?:\.\d+)?)['′]\s*(\d+(?:\.\d+)?)["″]/;
   const match1 = coordStr.match(degMinSecRegex1);
   if (match1) {
     const degrees = parseFloat(match1[1]);
     const minutes = parseFloat(match1[2]);
     const seconds = parseFloat(match1[3]);
     
-    let decimal = degrees + (minutes / 60) + (seconds / 3600);
-    if (ref === 'S' || ref === 'W') decimal = -decimal;
-    return decimal;
+    return degrees + (minutes / 60) + (seconds / 3600);
   }
   
-  // Otros formatos posibles
-  const degMinSecRegex2 = /(\d+)\s*deg\s*(\d+)'\s*(\d+\.?\d*)"/;
+  // Pattern 2: "XX deg XX' XX.XX""
+  const degMinSecRegex2 = /(\d+(?:\.\d+)?)\s*deg\s*(\d+(?:\.\d+)?)['′]\s*(\d+(?:\.\d+)?)["″]/;
   const match2 = coordStr.match(degMinSecRegex2);
   if (match2) {
     const degrees = parseFloat(match2[1]);
     const minutes = parseFloat(match2[2]);
     const seconds = parseFloat(match2[3]);
     
-    let decimal = degrees + (minutes / 60) + (seconds / 3600);
-    if (ref === 'S' || ref === 'W') decimal = -decimal;
-    return decimal;
+    return degrees + (minutes / 60) + (seconds / 3600);
   }
   
-  // Formato de solo números separados
+  // Pattern 3: "XX,XX,XX" or "XX XX XX" (common in some mobile formats)
   const parts = coordStr.split(/[^\d\.\-]+/).filter(part => part !== '');
   if (parts.length >= 1) {
     let decimal = parseFloat(parts[0] || '0');
     if (parts.length >= 2) decimal += parseFloat(parts[1] || '0') / 60;
     if (parts.length >= 3) decimal += parseFloat(parts[2] || '0') / 3600;
     
-    if (ref === 'S' || ref === 'W') decimal = -decimal;
     return decimal;
   }
   
   return 0;
 }
 
-// Extraer tiempo de exposición con soporte para múltiples formatos
+// Extract exposure time with support for multiple formats
 function extractExposureTime(tags: any): string | undefined {
-  // Buscar en múltiples ubicaciones posibles
   const exposureValue = findValue(tags, [
     'ExposureTime', 'ShutterSpeedValue', 'Exposure', 'ShutterSpeed',
     'ExpTime', 'Shutter', 'ExposureValue'
@@ -456,10 +541,12 @@ function extractExposureTime(tags: any): string | undefined {
   
   if (!exposureValue) return undefined;
   
-  // Si ya es una fracción, devolverlo como está
-  if (exposureValue.includes('/')) return exposureValue;
+  // If already a fraction, return as is
+  if (typeof exposureValue === 'string' && exposureValue.includes('/')) {
+    return exposureValue;
+  }
   
-  // Convertir a fracción si es decimal
+  // Convert to fraction if decimal
   const value = parseFloat(exposureValue);
   if (!isNaN(value) && value > 0 && value < 1) {
     return `1/${Math.round(1 / value)}`;
@@ -468,7 +555,7 @@ function extractExposureTime(tags: any): string | undefined {
   return exposureValue;
 }
 
-// Extraer número F con mejoras
+// Extract F-number with improvements
 function extractFNumber(tags: any): number | undefined {
   const fNumberStr = findValue(tags, [
     'FNumber', 'ApertureValue', 'Aperture', 'F-Stop', 
@@ -477,20 +564,20 @@ function extractFNumber(tags: any): number | undefined {
   
   if (!fNumberStr) return undefined;
   
-  // Buscar patrón f/X.X o solo el número
-  const match = fNumberStr.match(/f\/(\d+\.?\d*)|(\d+\.?\d*)/);
+  // Pattern: f/X.X or just the number
+  const match = String(fNumberStr).match(/f\/(\d+\.?\d*)|(\d+\.?\d*)/);
   if (match) {
     return parseFloat(match[1] || match[2]);
   }
   
-  // Si no hay patrón, intentar parsear directamente
-  const value = parseFloat(fNumberStr);
+  // Try to parse directly
+  const value = parseFloat(String(fNumberStr));
   if (!isNaN(value)) return value;
   
   return undefined;
 }
 
-// Extraer ISO con mejoras
+// Extract ISO with improvements
 function extractISO(tags: any): number | undefined {
   const isoStr = findValue(tags, [
     'ISOSpeedRatings', 'ISO', 'ISOSpeed', 'BaseISO',
@@ -499,26 +586,20 @@ function extractISO(tags: any): number | undefined {
 
   if (!isoStr) return undefined;
 
-  if (typeof isoStr === 'string') {
-    // Extraer solo dígitos si hay texto adicional
-    const match = isoStr.match(/(\d+)/);
-    if (match) {
-      return parseInt(match[1]);
-    }
-  
-    // Si no hay patrón, intentar parsear directamente
-    const value = parseInt(isoStr);
-    if (!isNaN(value)) return value;
-  
-    return undefined;
-  } else if (typeof isoStr === 'number') {
-    return isoStr;
-  } else {
-    return undefined;
+  // Extract only digits if there's additional text
+  const match = String(isoStr).match(/(\d+)/);
+  if (match) {
+    return parseInt(match[1]);
   }
+
+  // Try to parse directly
+  const value = parseInt(String(isoStr));
+  if (!isNaN(value)) return value;
+
+  return undefined;
 }
 
-// Extraer distancia focal con mejoras
+// Extract focal length with improvements
 function extractFocalLength(tags: any): number | undefined {
   const focalLengthStr = findValue(tags, [
     'FocalLength', 'Focal', 'FocalLengthIn35mmFilm',
@@ -527,57 +608,55 @@ function extractFocalLength(tags: any): number | undefined {
   
   if (!focalLengthStr) return undefined;
   
-  // Buscar patrón XX mm o solo el número
-  const match = focalLengthStr.match(/(\d+\.?\d*)\s*mm|(\d+\.?\d*)/);
+  // Pattern: XX mm or just the number
+  const match = String(focalLengthStr).match(/(\d+\.?\d*)\s*mm|(\d+\.?\d*)/);
   if (match) {
     return parseFloat(match[1] || match[2]);
   }
   
-  // Si no hay patrón, intentar parsear directamente
-  const value = parseFloat(focalLengthStr);
+  // Try to parse directly
+  const value = parseFloat(String(focalLengthStr));
   if (!isNaN(value)) return value;
   
   return undefined;
 }
 
-// Nuevas funciones para campos adicionales
-
-// Extraer orientación de la imagen
+// Extract image orientation
 function extractOrientation(tags: any): number | undefined {
   const orientationStr = findValue(tags, ['Orientation', 'ImageOrientation', 'Image Orientation']);
   
   if (!orientationStr) return undefined;
   
-  // Extraer solo dígitos si hay texto adicional
-  const match = orientationStr.match(/(\d+)/);
+  // Extract only digits if there's additional text
+  const match = String(orientationStr).match(/(\d+)/);
   if (match) {
     return parseInt(match[1]);
   }
   
-  // Si no hay patrón, intentar parsear directamente
-  const value = parseInt(orientationStr);
+  // Try to parse directly
+  const value = parseInt(String(orientationStr));
   if (!isNaN(value)) return value;
   
   return undefined;
 }
 
-// Extraer resolución de la imagen
+// Extract image resolution
 function extractResolution(tags: any): string | undefined {
   const xRes = findValue(tags, ['XResolution', 'ImageWidth', 'ExifImageWidth', 'Width']);
   const yRes = findValue(tags, ['YResolution', 'ImageHeight', 'ExifImageHeight', 'Height']);
   
   if (xRes && yRes) {
-    // Extraer solo dígitos si hay texto adicional
-    const xMatch = xRes.match(/(\d+)/);
-    const yMatch = yRes.match(/(\d+)/);
+    // Extract only digits if there's additional text
+    const xMatch = String(xRes).match(/(\d+)/);
+    const yMatch = String(yRes).match(/(\d+)/);
     
     if (xMatch && yMatch) {
       return `${xMatch[1]} x ${yMatch[1]}`;
     }
     
-    // Si no hay patrón, intentar parsear directamente
-    const x = parseInt(xRes);
-    const y = parseInt(yRes);
+    // Try to parse directly
+    const x = parseInt(String(xRes));
+    const y = parseInt(String(yRes));
     
     if (!isNaN(x) && !isNaN(y)) {
       return `${x} x ${y}`;
